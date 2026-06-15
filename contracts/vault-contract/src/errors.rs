@@ -73,6 +73,13 @@ pub enum ArithmeticError {
     ZeroRewardIncrement,
 }
 
+/// Specific errors related to vesting.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VestingError {
+    /// Thrown when a user tries to claim unvested rewards.
+    RewardsNotVested,
+}
+
 /// Specific errors related to authorization and security.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AuthorizationError {
@@ -91,35 +98,6 @@ pub enum AuthorizationError {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum VaultError {
-    /// Error code 1: The vault has already been initialized.
-    AlreadyInitialized = 1,
-    /// Error code 2: The vault has not been initialized yet.
-    NotInitialized = 2,
-    /// Error code 3: The caller is not authorized for this operation.
-    Unauthorized = 3,
-    /// Error code 4: The provided amount is invalid (e.g., zero).
-    InvalidAmount = 4,
-    /// Error code 5: The user has insufficient balance for the operation.
-    InsufficientBalance = 5,
-    /// Error code 6: An arithmetic overflow or underflow occurred.
-    MathOverflow = 6,
-    /// Error code 7: No deposits are present to receive distributed rewards.
-    NoDeposits = 7,
-    /// Error code 8: The token configuration (deposit vs reward) is invalid.
-    InvalidTokenConfiguration = 8,
-    /// Error code 9: The contract has insufficient funds to fulfill a request.
-    InsufficientContractBalance = 9,
-    /// Error code 10: A negative amount was provided where prohibited.
-    NegativeAmount = 10,
-    /// Error code 11: The provided address is invalid.
-    InvalidAddress = 11,
-    /// Error code 12: Reward calculation failed due to mathematical error.
-    RewardCalculationFailed = 12,
-    /// Error code 13: A reentrant call was detected and blocked.
-    ReentrancyDetected = 13,
-    /// Error code 14: The internal state of the contract is invalid.
-    InvalidState = 14,
-    /// Error code 15: The reward increment would be zero (amount too small).
     /// Vault has already been initialized
     AlreadyInitialized = 1,
     /// Vault has not been initialized
@@ -150,6 +128,8 @@ pub enum VaultError {
     /// Reward distribution rounded down to zero
     ZeroRewardIncrement = 15,
     NoPendingAdmin = 16,
+    /// Rewards are not yet vested
+    RewardsNotVested = 17,
 }
 
 impl VaultError {
@@ -218,6 +198,10 @@ impl VaultError {
             Self::NoPendingAdmin => ErrorInfo {
                 category: ErrorCategory::State,
                 message: "no pending admin transfer exists",
+            },
+            Self::RewardsNotVested => ErrorInfo {
+                category: ErrorCategory::Validation,
+                message: "rewards are not yet vested",
             },
         }
     }
@@ -293,6 +277,14 @@ impl From<AuthorizationError> for VaultError {
             AuthorizationError::Unauthorized => Self::Unauthorized,
             AuthorizationError::ReentrancyDetected => Self::ReentrancyDetected,
             AuthorizationError::UpgradeFailed => Self::UpgradeFailed,
+        }
+    }
+}
+
+impl From<VestingError> for VaultError {
+    fn from(error: VestingError) -> Self {
+        match error {
+            VestingError::RewardsNotVested => Self::RewardsNotVested,
         }
     }
 }

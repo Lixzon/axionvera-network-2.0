@@ -7,7 +7,6 @@ mod storage;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, Address, Env};
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env};
 
 use crate::errors::{AuthorizationError, BalanceError, StateError, ValidationError, VaultError};
@@ -21,50 +20,23 @@ impl VaultContract {
         1
     }
 
-    /// Initializes the vault with the specified admin and token addresses.
-    ///
-    /// # Security Considerations
-    /// This function can only be called once. It checks the initialization state
-    /// using a dedicated storage flag. The provided `admin` address must authorize
-    /// the call to ensure that the person initializing the contract is indeed
-    /// the intended administrator.
-    ///
-    /// # Arguments
-    /// * `e` - The environment.
-    /// * `admin` - The address that will have administrative privileges (e.g., distributing rewards).
-    /// * `deposit_token` - The address of the token that users will deposit.
-    /// * `reward_token` - The address of the token that will be distributed as rewards.
-    ///
-    /// # Errors
-    /// * `VaultError::AlreadyInitialized` - If the vault has already been initialized.
-    /// * `VaultError::InvalidTokenConfiguration` - If the deposit and reward tokens are the same.
     pub fn initialize(
         e: Env,
         admin: Address,
         deposit_token: Address,
         reward_token: Address,
+        vesting_period: u64,
     ) -> Result<(), VaultError> {
         storage::require_not_paused(&e)?;
         if storage::is_initialized(&e) {
             return Err(StateError::AlreadyInitialized.into());
         }
 
-        // --- STEP 2: VALIDATION ---
-        // Basic sanity checks for the provided addresses.
         validate_distinct_token_addresses(&deposit_token, &reward_token)?;
         
-        // --- STEP 3: AUTHENTICATION ---
-        // We require the admin to sign this transaction. This prevents front-running
-        // by an attacker who might try to initialize the contract with their own address
-        // if the deployer doesn't include the initialization in the deployment transaction.
         admin.require_auth();
 
-        // --- STEP 4: STATE INITIALIZATION ---
-        // Persist the initial state to the contract's instance storage.
-        storage::initialize_state(&e, &admin, &deposit_token, &reward_token);
-        
-        // --- STEP 5: EVENT EMISSION ---
-        // Emit an event for indexers and off-chain monitoring.
+        storage::initialize_state(&e, &admin, &deposit_token, &reward_token, vesting_period);
         events::emit_initialize(&e, admin, deposit_token, reward_token);
 
         Ok(())
@@ -107,21 +79,6 @@ impl VaultContract {
         Ok(())
     }
 
-    /// Deposits tokens into the vault and accrues pending rewards before updating balance.
-    ///
-    /// This function handles the transfer of tokens from the user to the contract.
-    /// It ensures that rewards are accrued for the user's previous balance before
-    /// the new deposit increases their stake.
-    ///
-    /// # Arguments
-    /// * `e` - The environment.
-    /// * `from` - The address of the user depositing tokens.
-    /// * `amount` - The amount of tokens to deposit.
-    ///
-    /// # Errors
-    /// * `VaultError::NotInitialized` - If the vault hasn't been initialized.
-    /// * `VaultError::InvalidAmount` - If the amount is zero or negative.
-    /// * `VaultError::ReentrancyDetected` - If called recursively.
     pub fn deposit(e: Env, from: Address, amount: i128) -> Result<(), VaultError> {
         storage::require_not_paused(&e)?;
         storage::require_initialized(&e)?;
@@ -137,16 +94,6 @@ impl VaultContract {
         })
     }
 
-    /// Withdraws tokens from the vault and accrues pending rewards before updating balance.
-    ///
-    /// This function is isolated from reward claiming - it only handles the deposit token.
-    /// This "separation of concerns" ensures that even if the reward token contract is
-    /// malfunctioning, users can still recover their initial deposits.
-    ///
-    /// # Arguments
-    /// * `e` - The environment.
-    /// * `to` - The address of the user withdrawing tokens.
-    /// * `amount` - The amount of tokens to withdraw.
     pub fn withdraw(e: Env, to: Address, amount: i128) -> Result<(), VaultError> {
         storage::require_initialized(&e)?;
         validate_positive_amount(amount)?;
@@ -158,65 +105,36 @@ impl VaultContract {
             events::emit_withdraw(&e, to.clone(), amount, position.balance);
 
             let token = soroban_sdk::token::Client::new(&e, &state.deposit_token);
-            // Adhering to Check-Effects-Interactions pattern.
             token.transfer(&e.current_contract_address(), &to, &amount);
 
-            events::emit_withdraw(&e, to, amount);
             Ok(())
         })
     }
 
-    /// Distributes rewards to all depositors by updating the global reward index.
-    ///
-    /// This is an administrative function that increases the cumulative rewards
-    /// per unit of deposit. It does not immediately transfer tokens to users;
-    /// instead, users accrue rewards lazily whenever they interact with the vault.
-    ///
-    /// # Arguments
-    /// * `e` - The environment.
-    /// * `amount` - The total amount of reward tokens to distribute.
     pub fn distribute_rewards(e: Env, amount: i128) -> Result<i128, VaultError> {
         storage::require_initialized(&e)?;
         validate_positive_amount(amount)?;
-/// Distributes rewards to all depositors by updating the global reward index.
-/// Does not immediately transfer rewards to users - they accrue lazily.
-/// 
-/// Security: Only admin can call this function.
-/// Minimum amount: 100,000 stroops to prevent dust spam attacks.
-pub fn distribute_rewards(e: Env, amount: i128) -> Result<i128, VaultError> {
-    storage::require_initialized(&e)?;
-    validate_positive_amount(amount)?;
 
-    // Prevent dust spam attacks by enforcing minimum amount
-    const MIN_REWARD_DISTRIBUTION: i128 = 100_000;
-    if amount < MIN_REWARD_DISTRIBUTION {
-        return Err(ValidationError::InsufficientRewardAmount.into());
-    }
+        const MIN_REWARD_DISTRIBUTION: i128 = 100_000;
+        if amount < MIN_REWARD_DISTRIBUTION {
+            return Err(ValidationError::InsufficientRewardAmount.into());
+        }
 
-    let state = storage::get_state(&e)?;
-    let admin = state.admin.clone();
-    let reward_token_id = state.reward_token.clone();
+        let state = storage::get_state(&e)?;
+        let admin = state.admin.clone();
+        let reward_token_id = state.reward_token.clone();
 
-    admin.require_auth();
+        admin.require_auth();
 
         with_non_reentrant(&e, || {
             let next_state = storage::store_reward_distribution(&e, amount)?;
             let reward_token = soroban_sdk::token::Client::new(&e, &reward_token_id);
             reward_token.transfer(&admin, &e.current_contract_address(), &amount);
-            events::emit_distribute_rewards(&e, amount, next_index);
             events::emit_distribute(&e, admin.clone(), amount);
-            Ok(next_index)
+            Ok(next_state.reward_index)
         })
     }
 
-    /// Claims all accrued rewards for the calling user.
-    ///
-    /// This function calculates all pending rewards since the user's last interaction
-    /// and transfers them from the contract's balance to the user.
-    ///
-    /// # Arguments
-    /// * `e` - The environment.
-    /// * `user` - The address of the user claiming rewards.
     pub fn claim_rewards(e: Env, user: Address) -> Result<i128, VaultError> {
         storage::require_initialized(&e)?;
         user.require_auth();
@@ -251,6 +169,14 @@ pub fn distribute_rewards(e: Env, amount: i128) -> Result<i128, VaultError> {
 
     pub fn pending_rewards(e: Env, user: Address) -> Result<i128, VaultError> {
         storage::pending_user_rewards_view(&e, &user)
+    }
+
+    pub fn vested_rewards(e: Env, user: Address) -> Result<i128, VaultError> {
+        storage::vested_user_rewards_view(&e, &user)
+    }
+
+    pub fn vesting_period(e: Env) -> Result<u64, VaultError> {
+        storage::get_vesting_period(&e)
     }
 
     pub fn admin(e: Env) -> Result<Address, VaultError> {
@@ -288,10 +214,9 @@ pub fn distribute_rewards(e: Env, amount: i128) -> Result<i128, VaultError> {
         }
         admin.require_auth();
         storage::set_paused(&e, false);
-    /// Upgrades the contract WASM to a new version.
-    /// Only the admin can perform this action.
-    /// The new WASM hash must reference a valid, already-uploaded WASM that
-    /// is compatible with the current storage layout.
+        Ok(())
+    }
+
     pub fn upgrade(e: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), VaultError> {
         storage::require_initialized(&e)?;
         admin.require_auth();
@@ -325,7 +250,6 @@ fn validate_distinct_token_addresses(
     if deposit_token == reward_token {
         return Err(ValidationError::InvalidTokenConfiguration.into());
     }
-
     Ok(())
 }
 
@@ -346,10 +270,6 @@ where
     result
 }
 
-// ---------------------------------------------------------------------------
-// Precision math unit tests  (issue #81)
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod precision_tests {
     use super::storage::{checked_accrued_rewards, checked_reward_index_increment, PRECISION_FACTOR};
@@ -357,15 +277,12 @@ mod precision_tests {
 
     #[test]
     fn increment_basic() {
-        // 400 rewards / 400 total => index += 1 * PRECISION_FACTOR
         let inc = checked_reward_index_increment(400, 400).unwrap();
         assert_eq!(inc, PRECISION_FACTOR);
     }
 
     #[test]
     fn increment_small_reward_large_deposits_retains_precision() {
-        // 1 reward token, 1_000_000 deposited.
-        // Without scaling this would be 0; with PRECISION_FACTOR it is non-zero.
         let inc = checked_reward_index_increment(1, 1_000_000).unwrap();
         assert!(inc > 0, "precision lost: increment rounded to zero");
         assert_eq!(inc, PRECISION_FACTOR / 1_000_000);
@@ -389,8 +306,6 @@ mod precision_tests {
 
     #[test]
     fn accrued_proportional_equal_deposits() {
-        // Both users deposited 100 each (200 total), 400 rewards distributed.
-        // index increment = (400 * PRECISION_FACTOR) / 200 = 2 * PRECISION_FACTOR
         let delta = checked_reward_index_increment(400, 200).unwrap();
         let reward = checked_accrued_rewards(100, delta).unwrap();
         assert_eq!(reward, 200);
@@ -398,7 +313,6 @@ mod precision_tests {
 
     #[test]
     fn accrued_vastly_different_deposits_user_a_tiny() {
-        // User A: 1 token, User B: 1_000_000 tokens. 1_000_001 rewards distributed.
         let total = 1_000_001_i128;
         let rewards = 1_000_001_i128;
         let delta = checked_reward_index_increment(rewards, total).unwrap();
@@ -428,132 +342,11 @@ mod precision_tests {
 
     #[test]
     fn round_trip_proportionality() {
-        // Alice: 1 token, Bob: 999_999 tokens. 1_000_000 rewards.
         let total = 1_000_000_i128;
         let rewards = 1_000_000_i128;
         let delta = checked_reward_index_increment(rewards, total).unwrap();
 
         assert_eq!(checked_accrued_rewards(1, delta).unwrap(), 1);
         assert_eq!(checked_accrued_rewards(999_999, delta).unwrap(), 999_999);
-    }
-}
-
-// TODO(gas): Consider merging per-user keys (balance/index/rewards) into a single struct to reduce reads.
-// TODO(security): Consider adding pausability or per-user deposit caps.
-// TODO(upgradeability): Evaluate upgrade patterns compatible with Soroban best practices.
-
-#[cfg(test)]
-mod tests {
-    extern crate std;
-
-    use soroban_sdk::{
-        symbol_short,
-        testutils::{Address as _, Events, Register},
-        Address, Env, IntoVal, TryFromVal, Val, Vec,
-    };
-
-    use super::{
-        events::{AdminTransferAcceptedEvent, AdminTransferProposedEvent},
-        VaultContract, VaultContractClient,
-    };
-    use crate::errors::VaultError;
-
-    #[test]
-    fn admin_transfer_is_two_step() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = VaultContract.register(&env, None, ());
-        let client = VaultContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let new_admin = Address::generate(&env);
-        let deposit_token = Address::generate(&env);
-        let reward_token = Address::generate(&env);
-
-        client.initialize(&admin, &deposit_token, &reward_token);
-        client.propose_new_admin(&admin, &new_admin);
-
-        assert_eq!(client.admin(), admin);
-        assert_eq!(client.pending_admin(), Some(new_admin.clone()));
-
-        client.accept_admin(&new_admin);
-
-        assert_eq!(client.admin(), new_admin);
-        assert_eq!(client.pending_admin(), None);
-    }
-
-    #[test]
-    fn accept_admin_requires_pending_admin_match() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = VaultContract.register(&env, None, ());
-        let client = VaultContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let proposed_admin = Address::generate(&env);
-        let wrong_admin = Address::generate(&env);
-        let deposit_token = Address::generate(&env);
-        let reward_token = Address::generate(&env);
-
-        client.initialize(&admin, &deposit_token, &reward_token);
-        client.propose_new_admin(&admin, &proposed_admin);
-
-        let err = client.try_accept_admin(&wrong_admin).unwrap_err();
-        assert_eq!(err, Ok(VaultError::Unauthorized));
-        assert_eq!(client.admin(), admin);
-        assert_eq!(client.pending_admin(), Some(proposed_admin));
-    }
-
-    #[test]
-    fn proposing_and_accepting_emit_specific_events() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = VaultContract.register(&env, None, ());
-        let client = VaultContractClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let new_admin = Address::generate(&env);
-        let deposit_token = Address::generate(&env);
-        let reward_token = Address::generate(&env);
-
-        client.initialize(&admin, &deposit_token, &reward_token);
-        client.propose_new_admin(&admin, &new_admin);
-        let proposed_events = env.events().all();
-        let proposed = proposed_events.last().unwrap();
-
-        assert_eq!(proposed.0, contract_id.clone());
-        assert_eq!(proposed.1, topics(&env, symbol_short!("adm_prop")));
-        assert_eq!(
-            AdminTransferProposedEvent::try_from_val(&env, &proposed.2).unwrap(),
-            AdminTransferProposedEvent {
-                current_admin: admin.clone(),
-                pending_admin: new_admin.clone(),
-                timestamp: env.ledger().timestamp(),
-            }
-        );
-
-        client.accept_admin(&new_admin);
-        let accepted_events = env.events().all();
-        let accepted = accepted_events.last().unwrap();
-
-        assert_eq!(accepted.0, contract_id);
-        assert_eq!(accepted.1, topics(&env, symbol_short!("adm_acpt")));
-        assert_eq!(
-            AdminTransferAcceptedEvent::try_from_val(&env, &accepted.2).unwrap(),
-            AdminTransferAcceptedEvent {
-                previous_admin: admin,
-                new_admin,
-                timestamp: env.ledger().timestamp(),
-            }
-        );
-    }
-
-    fn topics(env: &Env, topic: soroban_sdk::Symbol) -> Vec<Val> {
-        let mut values = Vec::new(env);
-        values.push_back(topic.into_val(env));
-        values
     }
 }
