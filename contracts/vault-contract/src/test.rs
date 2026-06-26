@@ -33,7 +33,14 @@ fn test_initialization_is_one_time() {
         &soroban_sdk::Vec::new(&e),
     );
 
-    let result = client.try_initialize(&admin, &deposit_token, &reward_token, &vesting_period, &0, &soroban_sdk::Vec::new(&e));
+    let result = client.try_initialize(
+        &admin,
+        &deposit_token,
+        &reward_token,
+        &vesting_period,
+        &0,
+        &soroban_sdk::Vec::new(&e),
+    );
 
     assert_eq!(result, Err(Ok(VaultError::AlreadyInitialized)));
 }
@@ -51,7 +58,14 @@ fn test_initialize_requires_admin_auth() {
     let reward_token = Address::generate(&e);
     let vesting_period = 86400u64;
 
-    let result = client.try_initialize(&admin, &deposit_token, &reward_token, &vesting_period, &0, &soroban_sdk::Vec::new(&e));
+    let result = client.try_initialize(
+        &admin,
+        &deposit_token,
+        &reward_token,
+        &vesting_period,
+        &0,
+        &soroban_sdk::Vec::new(&e),
+    );
 
     assert!(result.is_err());
 }
@@ -69,7 +83,14 @@ fn test_initialize_fails_with_same_tokens() {
     let token = Address::generate(&e);
     let vesting_period = 86400u64;
 
-    let result = client.try_initialize(&admin, &token, &token, &vesting_period, &0, &soroban_sdk::Vec::new(&e));
+    let result = client.try_initialize(
+        &admin,
+        &token,
+        &token,
+        &vesting_period,
+        &0,
+        &soroban_sdk::Vec::new(&e),
+    );
 
     assert_eq!(result, Err(Ok(VaultError::InvalidTokenConfiguration)));
 }
@@ -105,9 +126,7 @@ fn test_vesting() {
 
     // Mock token balances
     e.as_contract(&deposit_token, || {
-        e.storage()
-            .instance()
-            .set(&token::DataKey::Admin, &admin);
+        e.storage().instance().set(&token::DataKey::Admin, &admin);
         e.storage()
             .instance()
             .set(&token::DataKey::Balance(user.clone()), &1000i128);
@@ -117,8 +136,12 @@ fn test_vesting() {
     });
     e.as_contract(&reward_token, || {
         e.storage().instance().set(&token::DataKey::Admin, &admin);
-        e.storage().instance().set(&token::DataKey::Balance(admin.clone()), &200000i128);
-        e.storage().instance().set(&token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage()
+            .instance()
+            .set(&token::DataKey::Balance(admin.clone()), &200000i128);
+        e.storage()
+            .instance()
+            .set(&token::DataKey::Balance(contract_id.clone()), &0i128);
     });
 
     // User deposits tokens
@@ -157,6 +180,91 @@ fn test_vesting() {
     assert_eq!(claimed, 200000);
 }
 
+/// Tests penalty rate configuration and early locked withdrawal behavior.
+#[test]
+fn test_penalty_rate_and_early_locked_withdrawal() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let contract_id = e.register_contract(None, VaultContract {});
+    let client = VaultContractClient::new(&e, &contract_id);
+
+    let admin = Address::generate(&e);
+    let deposit_token = Address::generate(&e);
+    let reward_token = Address::generate(&e);
+    let vesting_period = 86400u64;
+    let user = Address::generate(&e);
+
+    client.initialize(
+        &admin,
+        &deposit_token,
+        &reward_token,
+        &vesting_period,
+        &0,
+        &soroban_sdk::Vec::new(&e),
+    );
+
+    // Set up mock token balances for deposit token contract.
+    e.as_contract(&deposit_token, || {
+        e.storage().instance().set(&token::DataKey::Admin, &admin);
+        e.storage()
+            .instance()
+            .set(&token::DataKey::Balance(user.clone()), &1000i128);
+        e.storage()
+            .instance()
+            .set(&token::DataKey::Balance(contract_id.clone()), &0i128);
+    });
+
+    // User deposits 100 tokens
+    client.deposit(&user, &100i128);
+
+    // Set penalty rate to 10%.
+    client.set_penalty_rate(&admin, &1000u32);
+    assert_eq!(client.penalty_rate(), 1000);
+
+    // Lock all deposited tokens.
+    client.lock(&user, &100i128, &86400u64);
+
+    // Early withdraw 50 tokens from locked funds.
+    let net_amount = client.withdraw_locked_early(&user, &50i128);
+    assert_eq!(net_amount, 45);
+
+    // Confirm penalties tracked.
+    assert_eq!(client.total_penalties(), 5);
+    assert_eq!(client.user_penalties(&user), 5);
+
+    // Confirm remaining balances after penalty.
+    assert_eq!(client.balance(&user), 50);
+    assert_eq!(client.locked_balance(&user), 50);
+}
+
+/// Tests that invalid penalty rates are rejected.
+#[test]
+fn test_set_penalty_rate_rejected_when_above_max() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let contract_id = e.register_contract(None, VaultContract {});
+    let client = VaultContractClient::new(&e, &contract_id);
+
+    let admin = Address::generate(&e);
+    let deposit_token = Address::generate(&e);
+    let reward_token = Address::generate(&e);
+    let vesting_period = 86400u64;
+
+    client.initialize(
+        &admin,
+        &deposit_token,
+        &reward_token,
+        &vesting_period,
+        &0,
+        &soroban_sdk::Vec::new(&e),
+    );
+
+    let result = client.try_set_penalty_rate(&admin, &10001u32);
+    assert_eq!(result, Err(Ok(VaultError::InvalidPenaltyRate)));
+}
+
 // ---------------------------------------------------------------------------
 // Multi-Asset Tests
 // ---------------------------------------------------------------------------
@@ -178,10 +286,10 @@ fn test_add_asset() {
     client.initialize(&admin, &deposit_token, &reward_token, &vesting_period);
 
     let new_asset = Address::generate(&e);
-    
+
     // Add asset
     client.add_asset(&admin, &new_asset);
-    
+
     // Verify asset is supported
     assert!(client.is_asset_supported(&new_asset));
 }
@@ -212,24 +320,36 @@ fn test_multiple_asset_deposits() {
 
     // Mock token balances
     e.as_contract(&asset1, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(user.clone()), &1000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(user.clone()),
+            &1000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
     e.as_contract(&asset2, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(user.clone()), &2000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(user.clone()),
+            &2000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
 
     // Deposit asset1
     client.deposit_asset(&user, &asset1, &100i128);
-    
+
     // Deposit asset2
     client.deposit_asset(&user, &asset2, &200i128);
 
     // Verify balances
     assert_eq!(client.balance_of_asset(&user, &asset1), 100);
     assert_eq!(client.balance_of_asset(&user, &asset2), 200);
-    
+
     // Verify total deposits
     assert_eq!(client.total_deposits_of_asset(&asset1), 100);
     assert_eq!(client.total_deposits_of_asset(&asset2), 200);
@@ -261,12 +381,24 @@ fn test_multiple_asset_withdrawals() {
 
     // Mock token balances
     e.as_contract(&asset1, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(user.clone()), &1000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(user.clone()),
+            &1000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
     e.as_contract(&asset2, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(user.clone()), &2000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(user.clone()),
+            &2000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
 
     // Deposit assets
@@ -275,14 +407,14 @@ fn test_multiple_asset_withdrawals() {
 
     // Withdraw from asset1
     client.withdraw_asset(&user, &asset1, &50i128);
-    
+
     // Withdraw from asset2
     client.withdraw_asset(&user, &asset2, &100i128);
 
     // Verify balances
     assert_eq!(client.balance_of_asset(&user, &asset1), 50);
     assert_eq!(client.balance_of_asset(&user, &asset2), 100);
-    
+
     // Verify total deposits
     assert_eq!(client.total_deposits_of_asset(&asset1), 50);
     assert_eq!(client.total_deposits_of_asset(&asset2), 100);
@@ -313,13 +445,28 @@ fn test_asset_reward_distribution() {
 
     // Mock token balances
     e.as_contract(&asset1, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(user1.clone()), &1000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(user2.clone()), &2000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(user1.clone()),
+            &1000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(user2.clone()),
+            &2000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
     e.as_contract(&reward_token, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(admin.clone()), &1000000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(admin.clone()),
+            &1000000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
 
     // Users deposit
@@ -335,7 +482,7 @@ fn test_asset_reward_distribution() {
     // Check pending rewards (user1 should get 1/3, user2 should get 2/3)
     let pending1 = client.pending_rewards_for_asset(&user1, &asset1);
     let pending2 = client.pending_rewards_for_asset(&user2, &asset1);
-    
+
     assert_eq!(pending1, 300000);
     assert_eq!(pending2, 600000);
 }
@@ -364,12 +511,24 @@ fn test_asset_reward_claiming() {
 
     // Mock token balances
     e.as_contract(&asset1, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(user.clone()), &1000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(user.clone()),
+            &1000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
     e.as_contract(&reward_token, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(admin.clone()), &1000000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(admin.clone()),
+            &1000000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
 
     // User deposits
@@ -413,16 +572,34 @@ fn test_independent_asset_tracking() {
 
     // Mock token balances
     e.as_contract(&asset1, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(user.clone()), &10000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(user.clone()),
+            &10000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
     e.as_contract(&asset2, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(user.clone()), &10000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(user.clone()),
+            &10000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
     e.as_contract(&reward_token, || {
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(admin.clone()), &2000000i128);
-        e.storage().instance().set(&soroban_sdk::token::DataKey::Balance(contract_id.clone()), &0i128);
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(admin.clone()),
+            &2000000i128,
+        );
+        e.storage().instance().set(
+            &soroban_sdk::token::DataKey::Balance(contract_id.clone()),
+            &0i128,
+        );
     });
 
     // Deposit different amounts to each asset
@@ -436,7 +613,7 @@ fn test_independent_asset_tracking() {
     // Check pending rewards are independent
     let pending1 = client.pending_rewards_for_asset(&user, &asset1);
     let pending2 = client.pending_rewards_for_asset(&user, &asset2);
-    
+
     assert_eq!(pending1, 300000);
     assert_eq!(pending2, 600000);
 
@@ -488,13 +665,17 @@ fn test_cross_contract_client_validate_contract() {
 
     // Test that self-contract validation fails
     e.as_contract(&contract_id, || {
-        let result = crate::cross_contract::CrossContractClient::validate_contract_exists(&e, &contract_id);
+        let result =
+            crate::cross_contract::CrossContractClient::validate_contract_exists(&e, &contract_id);
         assert!(result.is_err());
     });
 
     // Test that other contract validation passes
     e.as_contract(&contract_id, || {
-        let result = crate::cross_contract::CrossContractClient::validate_contract_exists(&e, &other_address);
+        let result = crate::cross_contract::CrossContractClient::validate_contract_exists(
+            &e,
+            &other_address,
+        );
         assert!(result.is_ok());
     });
 }

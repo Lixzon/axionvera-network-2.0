@@ -35,7 +35,7 @@ redis = { version = "0.23", features = ["tokio-comp"] }
 tonic = { version = "0.11", features = ["transport", "prost", "gzip"] }
 rustls = { version = "0.21", package = "rustls" }
 tokio-rustls = "0.23"
-tonic-rustls = "0.6"
+tonic-rustls = "0.3"
 rustls-pemfile = "1.0"
 tokio-stream = "0.1"
 prost = "0.12"
