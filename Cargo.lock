@@ -866,6 +866,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "axionvera-core"
+version = "0.1.0"
+dependencies = [
+ "axionvera-events",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "axionvera-events"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
+name = "axionvera-interfaces"
+version = "0.1.0"
+dependencies = [
+ "axionvera-events",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "axionvera-network-node"
 version = "0.1.0"
 dependencies = [
@@ -940,6 +963,9 @@ dependencies = [
 name = "axionvera-vault-contract"
 version = "0.1.0"
 dependencies = [
+ "axionvera-core",
+ "axionvera-events",
+ "axionvera-interfaces",
  "axionvera-vault-contract-v2",
  "proptest",
  "soroban-sdk",

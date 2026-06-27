@@ -97,7 +97,7 @@ impl EventIndexer {
             let filter = EventFilter {
                 event_type: "contract".to_string(),
                 contract_ids: vec![self.contract_id.clone()],
-                topics: vec![vec!["AxionVault".to_string()]],
+                topics: vec![vec!["AxVault".to_string()]],
             };
 
             let params = GetEventsParams {
@@ -121,13 +121,16 @@ impl EventIndexer {
                         let protocol = event.topic.get(0).cloned();
                         let action = event.topic.get(1).cloned();
                         
-                        // For now, store the raw event as JSON
+                        // Include event schema version in the JSON payload.
+                        // The database stores event_version in the data field
+                        // for forward compatibility.
                         let event_json = serde_json::json!({
                             "id": event.id,
                             "ledger": event.ledger,
                             "contract_id": event.contract_id,
                             "topic": event.topic,
-                            "value": event.value
+                            "value": event.value,
+                            "event_version": 1,
                         });
 
                         self.connection_pool

@@ -1,317 +1,248 @@
-use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, Symbol};
+use soroban_sdk::{Address, BytesN, Env};
 
-const PROTOCOL: Symbol = symbol_short!("AxionVault");
-const ACT_INIT: Symbol = symbol_short!("Initialize");
-const ACT_DEPOSIT: Symbol = symbol_short!("Deposit");
-const ACT_WITHDRAW: Symbol = symbol_short!("Withdraw");
-const ACT_DISTRIBUTE: Symbol = symbol_short!("Distribute");
-const ACT_CLAIM: Symbol = symbol_short!("Claim");
-const EVT_ADMIN_PROPOSED: Symbol = symbol_short!("AdminProp");
-const EVT_ADMIN_ACCEPTED: Symbol = symbol_short!("AdminAcpt");
-const ACT_LOCK: Symbol = symbol_short!("Lock");
-const ACT_UNLOCK: Symbol = symbol_short!("Unlock");
-const EVT_UPGRADE: Symbol = symbol_short!("Upgrade");
-const EVT_ASSET_ADDED: Symbol = symbol_short!("AssetAdd");
-const ACT_ASSET_DEPOSIT: Symbol = symbol_short!("AssetDep");
-const ACT_ASSET_WITHDRAW: Symbol = symbol_short!("AssetWith");
-const ACT_ASSET_DISTRIBUTE: Symbol = symbol_short!("AssetDist");
-const ACT_ASSET_CLAIM: Symbol = symbol_short!("AssetClm");
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InitializeEvent {
-    pub admin: Address,
-    pub deposit_token: Address,
-    pub reward_token: Address,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DepositEvent {
-    pub user: Address,
-    pub amount: i128,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WithdrawEvent {
-    pub user: Address,
-    pub amount: i128,
-    pub remaining_balance: i128,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DistributeEvent {
-    pub caller: Address,
-    pub amount: i128,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimEvent {
-    pub user: Address,
-    pub amount: i128,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdminTransferProposedEvent {
-    pub current_admin: Address,
-    pub pending_admin: Address,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdminTransferAcceptedEvent {
-    pub previous_admin: Address,
-    pub new_admin: Address,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeEvent {
-    pub admin: Address,
-    pub new_wasm_hash: BytesN<32>,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AssetAddedEvent {
-    pub asset: Address,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AssetDepositEvent {
-    pub user: Address,
-    pub asset: Address,
-    pub amount: i128,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AssetWithdrawEvent {
-    pub user: Address,
-    pub asset: Address,
-    pub amount: i128,
-    pub remaining_balance: i128,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AssetDistributeEvent {
-    pub caller: Address,
-    pub asset: Address,
-    pub amount: i128,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AssetClaimEvent {
-    pub user: Address,
-    pub asset: Address,
-    pub amount: i128,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LockEvent {
-    pub user: Address,
-    pub amount: i128,
-    pub unlock_timestamp: u64,
-    pub timestamp: u64,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UnlockEvent {
-    pub user: Address,
-    pub amount: i128,
-    pub timestamp: u64,
-}
+use axionvera_core;
+use axionvera_events::{
+    self,
+    AdminTransferAcceptedEvent, AdminTransferProposedEvent, AssetAddedEvent, AssetClaimEvent,
+    AssetDepositEvent, AssetDistributeEvent, AssetWithdrawEvent, ClaimEvent, DepositEvent,
+    DistributeEvent, InitializeEvent, LockEvent, PauseEvent, UnlockEvent, UnpauseEvent,
+    UpgradeEvent, WithdrawEvent, EVENT_VERSION, PROTOCOL, ACT_INIT, ACT_DEPOSIT, ACT_WITHDRAW,
+    ACT_DISTRIBUTE, ACT_CLAIM, ACT_LOCK, ACT_UNLOCK, ACT_ADMIN_PROPOSED, ACT_ADMIN_ACCEPTED,
+    ACT_UPGRADE, ACT_PAUSE, ACT_UNPAUSE, ACT_ASSET_ADDED, ACT_ASSET_DEPOSIT, ACT_ASSET_WITHDRAW,
+    ACT_ASSET_DISTRIBUTE, ACT_ASSET_CLAIM,
+};
 
 pub fn emit_initialize(e: &Env, admin: Address, deposit_token: Address, reward_token: Address) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
         (PROTOCOL, ACT_INIT),
         InitializeEvent {
-            admin,
+            event_version: EVENT_VERSION,
+            admin: admin.clone(),
             deposit_token,
             reward_token,
-            timestamp: e.ledger().timestamp(),
-        },
-    );
-}
-
-pub fn emit_lock(e: &Env, user: Address, amount: i128, unlock_timestamp: u64) {
-    e.events().publish(
-        (PROTOCOL, ACT_LOCK),
-        LockEvent {
-            user,
-            amount,
-            unlock_timestamp,
-            timestamp: e.ledger().timestamp(),
-        },
-    );
-}
-
-pub fn emit_unlock(e: &Env, user: Address, amount: i128) {
-    e.events().publish(
-        (PROTOCOL, ACT_UNLOCK),
-        UnlockEvent {
-            user,
-            amount,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
 }
 
 pub fn emit_deposit(e: &Env, user: Address, amount: i128) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
         (PROTOCOL, ACT_DEPOSIT),
         DepositEvent {
-            user,
+            event_version: EVENT_VERSION,
+            user: user.clone(),
             amount,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
+    axionvera_core::index_event(e, ACT_DEPOSIT, Some(user.clone()), None, amount);
+    axionvera_core::record_interacting_user(e, &user);
 }
 
 pub fn emit_withdraw(e: &Env, user: Address, amount: i128, remaining_balance: i128) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
         (PROTOCOL, ACT_WITHDRAW),
         WithdrawEvent {
-            user,
+            event_version: EVENT_VERSION,
+            user: user.clone(),
             amount,
             remaining_balance,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
+    axionvera_core::index_event(e, ACT_WITHDRAW, Some(user.clone()), None, amount);
 }
 
 pub fn emit_distribute(e: &Env, caller: Address, amount: i128) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
         (PROTOCOL, ACT_DISTRIBUTE),
         DistributeEvent {
+            event_version: EVENT_VERSION,
             caller,
             amount,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
 }
 
 pub fn emit_claim_rewards(e: &Env, user: Address, amount: i128) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
         (PROTOCOL, ACT_CLAIM),
         ClaimEvent {
-            user,
+            event_version: EVENT_VERSION,
+            user: user.clone(),
             amount,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
+    axionvera_core::index_event(e, ACT_CLAIM, Some(user.clone()), None, amount);
+}
+
+pub fn emit_lock(e: &Env, user: Address, amount: i128, unlock_timestamp: u64) {
+    let ts = axionvera_events::ledger_timestamp(e);
+    e.events().publish(
+        (PROTOCOL, ACT_LOCK),
+        LockEvent {
+            event_version: EVENT_VERSION,
+            user: user.clone(),
+            amount,
+            unlock_timestamp,
+            timestamp: ts,
+        },
+    );
+    axionvera_core::index_event(e, ACT_LOCK, Some(user.clone()), None, amount);
+}
+
+pub fn emit_unlock(e: &Env, user: Address, amount: i128) {
+    let ts = axionvera_events::ledger_timestamp(e);
+    e.events().publish(
+        (PROTOCOL, ACT_UNLOCK),
+        UnlockEvent {
+            event_version: EVENT_VERSION,
+            user: user.clone(),
+            amount,
+            timestamp: ts,
+        },
+    );
+    axionvera_core::index_event(e, ACT_UNLOCK, Some(user.clone()), None, amount);
 }
 
 pub fn emit_admin_transfer_proposed(e: &Env, current_admin: Address, pending_admin: Address) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
-        (EVT_ADMIN_PROPOSED,),
+        (PROTOCOL, ACT_ADMIN_PROPOSED),
         AdminTransferProposedEvent {
+            event_version: EVENT_VERSION,
             current_admin,
             pending_admin,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
 }
 
 pub fn emit_admin_transfer_accepted(e: &Env, previous_admin: Address, new_admin: Address) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
-        (EVT_ADMIN_ACCEPTED,),
+        (PROTOCOL, ACT_ADMIN_ACCEPTED),
         AdminTransferAcceptedEvent {
+            event_version: EVENT_VERSION,
             previous_admin,
             new_admin,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
 }
 
 pub fn emit_upgrade(e: &Env, admin: Address, new_wasm_hash: BytesN<32>) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
-        (EVT_UPGRADE,),
+        (PROTOCOL, ACT_UPGRADE),
         UpgradeEvent {
+            event_version: EVENT_VERSION,
             admin,
             new_wasm_hash,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
+        },
+    );
+}
+
+pub fn emit_pause(e: &Env, admin: Address) {
+    let ts = axionvera_events::ledger_timestamp(e);
+    e.events().publish(
+        (PROTOCOL, ACT_PAUSE),
+        PauseEvent {
+            event_version: EVENT_VERSION,
+            admin,
+            timestamp: ts,
+        },
+    );
+}
+
+pub fn emit_unpause(e: &Env, admin: Address) {
+    let ts = axionvera_events::ledger_timestamp(e);
+    e.events().publish(
+        (PROTOCOL, ACT_UNPAUSE),
+        UnpauseEvent {
+            event_version: EVENT_VERSION,
+            admin,
+            timestamp: ts,
         },
     );
 }
 
 pub fn emit_asset_added(e: &Env, asset: Address) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
-        (EVT_ASSET_ADDED,),
+        (PROTOCOL, ACT_ASSET_ADDED),
         AssetAddedEvent {
+            event_version: EVENT_VERSION,
             asset,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
 }
 
 pub fn emit_asset_deposit(e: &Env, user: Address, asset: Address, amount: i128) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
         (PROTOCOL, ACT_ASSET_DEPOSIT),
         AssetDepositEvent {
-            user,
-            asset,
+            event_version: EVENT_VERSION,
+            user: user.clone(),
+            asset: asset.clone(),
             amount,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
+    axionvera_core::index_event(e, ACT_ASSET_DEPOSIT, Some(user.clone()), Some(asset), amount);
 }
 
 pub fn emit_asset_withdraw(e: &Env, user: Address, asset: Address, amount: i128, remaining_balance: i128) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
         (PROTOCOL, ACT_ASSET_WITHDRAW),
         AssetWithdrawEvent {
-            user,
-            asset,
+            event_version: EVENT_VERSION,
+            user: user.clone(),
+            asset: asset.clone(),
             amount,
             remaining_balance,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
+    axionvera_core::index_event(e, ACT_ASSET_WITHDRAW, Some(user.clone()), Some(asset), amount);
 }
 
 pub fn emit_asset_distribute(e: &Env, caller: Address, asset: Address, amount: i128) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
         (PROTOCOL, ACT_ASSET_DISTRIBUTE),
         AssetDistributeEvent {
+            event_version: EVENT_VERSION,
             caller,
             asset,
             amount,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
 }
 
 pub fn emit_asset_claim_rewards(e: &Env, user: Address, asset: Address, amount: i128) {
+    let ts = axionvera_events::ledger_timestamp(e);
     e.events().publish(
         (PROTOCOL, ACT_ASSET_CLAIM),
         AssetClaimEvent {
-            user,
-            asset,
+            event_version: EVENT_VERSION,
+            user: user.clone(),
+            asset: asset.clone(),
             amount,
-            timestamp: e.ledger().timestamp(),
+            timestamp: ts,
         },
     );
+    axionvera_core::index_event(e, ACT_ASSET_CLAIM, Some(user.clone()), Some(asset), amount);
 }

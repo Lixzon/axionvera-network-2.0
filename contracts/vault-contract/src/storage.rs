@@ -13,6 +13,28 @@ const INSTANCE_TTL_EXTEND_TO: u32 = 518_400;
 const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
 const PERSISTENT_TTL_EXTEND_TO: u32 = 518_400;
 
+/// A point on the utilization-to-reward-multiplier curve.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiplierPoint {
+    /// Utilization in basis points (0-10000).
+    pub utilization_bps: u32,
+    /// Reward multiplier in basis points (e.g., 10000 = 1.0x, 15000 = 1.5x).
+    pub multiplier_bps: u32,
+}
+
+/// A time-locked deposit entry for a user.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Lock {
+    /// The amount of tokens locked.
+    pub amount: i128,
+    /// The timestamp at which the lock expires.
+    pub unlock_timestamp: u64,
+    /// Reserved for future reward multiplier on locked funds.
+    pub reward_multiplier: u32,
+}
+
 /// Keys used to store data in the contract's storage.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +63,10 @@ pub enum DataKey {
     ReentrancyGuard,
     /// Pause flag
     IsPaused,
+    /// User liquid balance (unlocked deposits)
+    UserLiquidBalance(Address),
+    /// User lock entries
+    UserLocks(Address),
     /// User balance (legacy, kept for backwards compatibility)
     UserBalance(Address),
     /// User's last synced reward index (legacy, kept for backwards compatibility)

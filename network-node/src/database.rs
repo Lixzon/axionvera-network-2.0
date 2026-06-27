@@ -83,6 +83,7 @@ impl ConnectionPool {
                 asset_address TEXT,
                 amount NUMERIC,
                 timestamp BIGINT,
+                event_version INTEGER DEFAULT 1,
                 data JSONB NOT NULL,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             )"
@@ -105,6 +106,12 @@ impl ConnectionPool {
             .execute(&self.pool)
             .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_action ON events (action)")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_version ON events (event_version)")
             .execute(&self.pool)
             .await?;
 
@@ -171,10 +178,13 @@ impl ConnectionPool {
         timestamp: Option<i64>,
         data: serde_json::Value,
     ) -> Result<()> {
+        // Extract event_version from the data payload if present
+        let event_version = data.get("event_version").and_then(|v| v.as_i64());
+
         sqlx::query(
             "INSERT INTO events 
-             (event_id, ledger_sequence, contract_id, event_type, protocol, action, user_address, asset_address, amount, timestamp, data)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             (event_id, ledger_sequence, contract_id, event_type, protocol, action, user_address, asset_address, amount, timestamp, event_version, data)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              ON CONFLICT (event_id) DO NOTHING"
         )
         .bind(event_id)
@@ -187,6 +197,7 @@ impl ConnectionPool {
         .bind(asset_address)
         .bind(amount)
         .bind(timestamp)
+        .bind(event_version)
         .bind(data)
         .execute(&self.pool)
         .await

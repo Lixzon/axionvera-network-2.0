@@ -290,6 +290,7 @@ impl VaultContract {
         let admin = storage::get_admin(&e)?;
         admin.require_auth();
         storage::set_paused(&e, true);
+        events::emit_pause(&e, admin);
         Ok(())
     }
 
@@ -298,6 +299,7 @@ impl VaultContract {
         let admin = storage::get_admin(&e)?;
         admin.require_auth();
         storage::set_paused(&e, false);
+        events::emit_unpause(&e, admin);
         Ok(())
     }
 

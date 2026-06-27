@@ -1,0 +1,13 @@
+[package]
+name = "axionvera-interfaces"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+soroban-sdk = "22.0.0"
+axionvera-events = { path = "../events" }

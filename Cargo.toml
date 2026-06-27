@@ -3,8 +3,12 @@ resolver = "2"
 members = [
   "contracts/vault-contract",
   "contracts/vault-contract-v2",
+  "contracts/events",
+  "contracts/core",
+  "contracts/interfaces",
   "network-node",
 ]
+
 
 [profile.release]
 opt-level = "z"
