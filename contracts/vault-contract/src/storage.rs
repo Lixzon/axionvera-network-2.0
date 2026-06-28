@@ -1,6 +1,8 @@
 use soroban_sdk::{contracttype, Address, Env, Map};
 
-use crate::errors::{ArithmeticError, AuthorizationError, BalanceError, StateError, ValidationError, VaultError};
+use crate::errors::{
+    ArithmeticError, AuthorizationError, BalanceError, StateError, ValidationError, VaultError,
+};
 
 pub const PRECISION_FACTOR: i128 = 1_000_000_000;
 const REWARD_INDEX_SCALE: i128 = PRECISION_FACTOR;
@@ -73,6 +75,16 @@ pub enum DataKey {
     UserAccruedRewards(Address),
     /// User's last reward distribution timestamp (legacy, kept for backwards compatibility)
     UserLastRewardTimestamp(Address),
+    /// User's liquid balance (available for immediate withdrawal)
+    UserLiquidBalance(Address),
+    /// User's active lock entries
+    UserLocks(Address),
+    /// Penalty rate in basis points for early withdrawals
+    PenaltyRateBps,
+    /// Total penalty amount collected by the vault
+    TotalPenalties,
+    /// Total penalty amount paid by a specific user
+    UserPenaltyPaid(Address),
     /// Map of supported asset addresses
     SupportedAssets,
     /// Total deposits per asset
@@ -107,6 +119,10 @@ pub struct VaultState {
     pub vesting_period: u64,
     /// The target deposit amount for calculating utilization.
     pub target_deposits: i128,
+    /// The penalty rate applied to early locked withdrawals (bps).
+    pub penalty_rate_bps: u32,
+    /// Total penalty amount collected by the vault.
+    pub total_penalties: i128,
     /// A list of points defining the utilization-to-reward multiplier curve.
     pub utilization_multipliers: soroban_sdk::Vec<MultiplierPoint>,
 }
@@ -123,6 +139,28 @@ pub struct UserPosition {
     pub accrued_rewards: i128,
     /// The timestamp of the last reward distribution affecting this user.
     pub last_reward_timestamp: u64,
+}
+
+/// A single time-locked deposit entry.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Lock {
+    /// The amount locked in this entry.
+    pub amount: i128,
+    /// The earliest timestamp when these funds may be unlocked without penalty.
+    pub unlock_timestamp: u64,
+    /// A placeholder for future locked-reward multiplier support.
+    pub reward_multiplier: u32,
+}
+
+/// A reward multiplier entry used to compute dynamic reward curves.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiplierPoint {
+    /// Utilization threshold in basis points.
+    pub utilization_bps: u32,
+    /// Reward multiplier in basis points.
+    pub multiplier_bps: u32,
 }
 
 /// Snapshot of a user's position across multiple assets.
@@ -164,7 +202,11 @@ pub fn require_initialized(e: &Env) -> Result<(), VaultError> {
 }
 
 pub fn require_not_paused(e: &Env) -> Result<(), VaultError> {
-    if e.storage().instance().get::<_, bool>(&DataKey::IsPaused).unwrap_or(false) {
+    if e.storage()
+        .instance()
+        .get::<_, bool>(&DataKey::IsPaused)
+        .unwrap_or(false)
+    {
         Err(AuthorizationError::Unauthorized.into())
     } else {
         Ok(())
@@ -183,18 +225,30 @@ pub fn initialize_state(
     e.storage().instance().set(&DataKey::Initialized, &true);
     e.storage().instance().set(&DataKey::Admin, admin);
     e.storage().instance().remove(&DataKey::PendingAdmin);
-    e.storage().instance().set(&DataKey::DepositToken, deposit_token);
-    e.storage().instance().set(&DataKey::RewardToken, reward_token);
-    e.storage().instance().set(&DataKey::VestingPeriod, &vesting_period);
+    e.storage()
+        .instance()
+        .set(&DataKey::DepositToken, deposit_token);
+    e.storage()
+        .instance()
+        .set(&DataKey::RewardToken, reward_token);
+    e.storage()
+        .instance()
+        .set(&DataKey::VestingPeriod, &vesting_period);
     e.storage().instance().set(&DataKey::TotalDeposits, &0_i128);
     e.storage().instance().set(&DataKey::RewardIndex, &0_i128);
     e.storage()
         .instance()
         .set(&DataKey::TargetDeposits, &target_deposits);
+    e.storage().instance().set(&DataKey::PenaltyRateBps, &0_u32);
+    e.storage()
+        .instance()
+        .set(&DataKey::TotalPenalties, &0_i128);
     e.storage()
         .instance()
         .set(&DataKey::UtilizationMultipliers, utilization_multipliers);
-    e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+    e.storage()
+        .instance()
+        .set(&DataKey::ReentrancyGuard, &false);
     e.storage().instance().set(&DataKey::IsPaused, &false);
     bump_instance_ttl(e);
 }
@@ -245,6 +299,16 @@ pub fn get_state(e: &Env) -> Result<VaultState, VaultError> {
         .instance()
         .get(&DataKey::UtilizationMultipliers)
         .unwrap_or_else(|| soroban_sdk::Vec::new(e));
+    let penalty_rate_bps = e
+        .storage()
+        .instance()
+        .get(&DataKey::PenaltyRateBps)
+        .unwrap_or(0_u32);
+    let total_penalties = e
+        .storage()
+        .instance()
+        .get(&DataKey::TotalPenalties)
+        .unwrap_or(0_i128);
     bump_instance_ttl(e);
     Ok(VaultState {
         admin,
@@ -254,6 +318,8 @@ pub fn get_state(e: &Env) -> Result<VaultState, VaultError> {
         reward_index,
         vesting_period,
         target_deposits,
+        penalty_rate_bps,
+        total_penalties,
         utilization_multipliers,
     })
 }
@@ -275,7 +341,9 @@ pub fn get_pending_admin(e: &Env) -> Result<Option<Address>, VaultError> {
 }
 
 pub fn set_pending_admin(e: &Env, pending_admin: &Address) {
-    e.storage().instance().set(&DataKey::PendingAdmin, pending_admin);
+    e.storage()
+        .instance()
+        .set(&DataKey::PendingAdmin, pending_admin);
     bump_instance_ttl(e);
 }
 
@@ -333,6 +401,175 @@ pub fn set_utilization_multipliers(e: &Env, multipliers: &soroban_sdk::Vec<Multi
     bump_instance_ttl(e);
 }
 
+pub fn get_penalty_rate_bps(e: &Env) -> Result<u32, VaultError> {
+    require_initialized(e)?;
+    let rate = e
+        .storage()
+        .instance()
+        .get(&DataKey::PenaltyRateBps)
+        .unwrap_or(0_u32);
+    bump_instance_ttl(e);
+    Ok(rate)
+}
+
+pub fn set_penalty_rate_bps(e: &Env, rate_bps: u32) {
+    e.storage()
+        .instance()
+        .set(&DataKey::PenaltyRateBps, &rate_bps);
+    bump_instance_ttl(e);
+}
+
+pub fn get_total_penalties(e: &Env) -> Result<i128, VaultError> {
+    require_initialized(e)?;
+    let total = e
+        .storage()
+        .instance()
+        .get(&DataKey::TotalPenalties)
+        .unwrap_or(0_i128);
+    bump_instance_ttl(e);
+    Ok(total)
+}
+
+pub fn set_total_penalties(e: &Env, amount: i128) {
+    e.storage()
+        .instance()
+        .set(&DataKey::TotalPenalties, &amount);
+    bump_instance_ttl(e);
+}
+
+pub fn get_user_penalty_paid(e: &Env, user: &Address) -> Result<i128, VaultError> {
+    require_initialized(e)?;
+    let total = e
+        .storage()
+        .persistent()
+        .get(&DataKey::UserPenaltyPaid(user.clone()))
+        .unwrap_or(0_i128);
+    if total != 0 {
+        bump_persistent_ttl(e, &DataKey::UserPenaltyPaid(user.clone()));
+    }
+    Ok(total)
+}
+
+pub fn set_user_penalty_paid(e: &Env, user: &Address, amount: i128) {
+    let key = DataKey::UserPenaltyPaid(user.clone());
+    if amount == 0 {
+        e.storage().persistent().remove(&key);
+    } else {
+        e.storage().persistent().set(&key, &amount);
+        bump_persistent_ttl(e, &key);
+    }
+}
+
+pub fn increase_penalty_totals(e: &Env, user: &Address, amount: i128) -> Result<(), VaultError> {
+    let current_user = get_user_penalty_paid(e, user)?;
+    let next_user = current_user
+        .checked_add(amount)
+        .ok_or(ArithmeticError::Overflow)?;
+    set_user_penalty_paid(e, user, next_user);
+
+    let current_total = get_total_penalties(e)?;
+    let next_total = current_total
+        .checked_add(amount)
+        .ok_or(ArithmeticError::Overflow)?;
+    set_total_penalties(e, next_total);
+    Ok(())
+}
+
+pub fn store_early_withdraw_locked(
+    e: &Env,
+    user: &Address,
+    amount: i128,
+) -> Result<(VaultState, UserPosition, i128, i128), VaultError> {
+    let state = get_state(e)?;
+    let penalty_rate_bps = state.penalty_rate_bps;
+    let mut position = get_user_position_unchecked(e, user)?;
+
+    accrue_position_rewards(e, &state, &mut position)?;
+
+    let current_timestamp = e.ledger().timestamp();
+    let locks = get_user_locks_unchecked(e, user);
+
+    let mut remaining = amount;
+    let mut penalty_total: i128 = 0;
+    let mut next_locks = soroban_sdk::Vec::new(e);
+
+    for lock in locks.iter() {
+        if remaining == 0 {
+            next_locks.push_back(lock);
+            continue;
+        }
+
+        let withdraw_amount = if lock.amount <= remaining {
+            lock.amount
+        } else {
+            remaining
+        };
+
+        let penalty = if lock.unlock_timestamp > current_timestamp {
+            withdraw_amount
+                .checked_mul(penalty_rate_bps as i128)
+                .ok_or(ArithmeticError::Overflow)?
+                .checked_div(10000)
+                .ok_or(ArithmeticError::RewardCalculationFailed)?
+        } else {
+            0
+        };
+
+        penalty_total = penalty_total
+            .checked_add(penalty)
+            .ok_or(ArithmeticError::Overflow)?;
+
+        let remaining_lock_amount = lock
+            .amount
+            .checked_sub(withdraw_amount)
+            .ok_or(ArithmeticError::Overflow)?;
+        if remaining_lock_amount > 0 {
+            next_locks.push_back(Lock {
+                amount: remaining_lock_amount,
+                unlock_timestamp: lock.unlock_timestamp,
+                reward_multiplier: lock.reward_multiplier,
+            });
+        }
+
+        remaining = remaining
+            .checked_sub(withdraw_amount)
+            .ok_or(ArithmeticError::Overflow)?;
+    }
+
+    if remaining != 0 {
+        return Err(BalanceError::InsufficientBalance.into());
+    }
+
+    let net_amount = amount
+        .checked_sub(penalty_total)
+        .ok_or(ArithmeticError::Overflow)?;
+
+    position.balance = position
+        .balance
+        .checked_sub(amount)
+        .ok_or(ArithmeticError::Overflow)?;
+
+    let next_total = state
+        .total_deposits
+        .checked_sub(amount)
+        .ok_or(ArithmeticError::Overflow)?;
+
+    set_user_locks(e, user, &next_locks);
+    set_user_position(e, user, &position);
+    set_total_deposits(e, next_total);
+    increase_penalty_totals(e, user, penalty_total)?;
+
+    Ok((
+        VaultState {
+            total_deposits: next_total,
+            ..state
+        },
+        position,
+        net_amount,
+        penalty_total,
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Reentrancy Guard
 // ---------------------------------------------------------------------------
@@ -351,7 +588,9 @@ pub fn enter_non_reentrant(e: &Env) -> Result<(), VaultError> {
 }
 
 pub fn exit_non_reentrant(e: &Env) {
-    e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+    e.storage()
+        .instance()
+        .set(&DataKey::ReentrancyGuard, &false);
     bump_instance_ttl(e);
 }
 
@@ -596,12 +835,7 @@ pub fn store_withdraw(
 // Lock/Unlock Logic
 // ---------------------------------------------------------------------------
 
-pub fn store_lock(
-    e: &Env,
-    user: &Address,
-    amount: i128,
-    duration: u64,
-) -> Result<(), VaultError> {
+pub fn store_lock(e: &Env, user: &Address, amount: i128, duration: u64) -> Result<(), VaultError> {
     let state = get_state(e)?;
     let mut position = get_user_position_unchecked(e, user)?;
 
@@ -910,12 +1144,18 @@ pub fn add_supported_asset(e: &Env, asset: &Address) -> Result<(), VaultError> {
     let mut assets = get_supported_assets(e);
     if !assets.contains_key(asset.clone()) {
         assets.set(asset.clone(), true);
-        e.storage().instance().set(&DataKey::SupportedAssets, &assets);
-        
+        e.storage()
+            .instance()
+            .set(&DataKey::SupportedAssets, &assets);
+
         // Initialize asset-specific state
-        e.storage().instance().set(&DataKey::AssetTotalDeposits(asset.clone()), &0_i128);
-        e.storage().instance().set(&DataKey::AssetRewardIndex(asset.clone()), &0_i128);
-        
+        e.storage()
+            .instance()
+            .set(&DataKey::AssetTotalDeposits(asset.clone()), &0_i128);
+        e.storage()
+            .instance()
+            .set(&DataKey::AssetRewardIndex(asset.clone()), &0_i128);
+
         bump_instance_ttl(e);
     }
     Ok(())
@@ -948,7 +1188,9 @@ pub fn get_asset_total_deposits(e: &Env, asset: &Address) -> Result<i128, VaultE
 
 /// Set total deposits for a specific asset
 pub fn set_asset_total_deposits(e: &Env, asset: &Address, total: i128) {
-    e.storage().instance().set(&DataKey::AssetTotalDeposits(asset.clone()), &total);
+    e.storage()
+        .instance()
+        .set(&DataKey::AssetTotalDeposits(asset.clone()), &total);
     bump_instance_ttl(e);
 }
 
@@ -965,12 +1207,18 @@ pub fn get_asset_reward_index(e: &Env, asset: &Address) -> Result<i128, VaultErr
 
 /// Set reward index for a specific asset
 pub fn set_asset_reward_index(e: &Env, asset: &Address, index: i128) {
-    e.storage().instance().set(&DataKey::AssetRewardIndex(asset.clone()), &index);
+    e.storage()
+        .instance()
+        .set(&DataKey::AssetRewardIndex(asset.clone()), &index);
     bump_instance_ttl(e);
 }
 
 /// Get user position for a specific asset
-pub fn get_user_asset_position(e: &Env, user: &Address, asset: &Address) -> Result<UserPosition, VaultError> {
+pub fn get_user_asset_position(
+    e: &Env,
+    user: &Address,
+    asset: &Address,
+) -> Result<UserPosition, VaultError> {
     require_initialized(e)?;
     if !is_asset_supported(e, asset) {
         return Err(ValidationError::InvalidAddress.into());
@@ -982,7 +1230,8 @@ pub fn get_user_asset_position_unchecked(e: &Env, user: &Address, asset: &Addres
     let balance_key = DataKey::UserAssetBalance(user.clone(), asset.clone());
     let reward_index_key = DataKey::UserAssetRewardIndex(user.clone(), asset.clone());
     let accrued_rewards_key = DataKey::UserAssetAccruedRewards(user.clone(), asset.clone());
-    let last_reward_timestamp_key = DataKey::UserAssetLastRewardTimestamp(user.clone(), asset.clone());
+    let last_reward_timestamp_key =
+        DataKey::UserAssetLastRewardTimestamp(user.clone(), asset.clone());
 
     let balance = e.storage().persistent().get(&balance_key).unwrap_or(0_i128);
     let reward_index = e
@@ -1027,12 +1276,15 @@ pub fn set_user_asset_position(e: &Env, user: &Address, asset: &Address, positio
     let balance_key = DataKey::UserAssetBalance(user.clone(), asset.clone());
     let reward_index_key = DataKey::UserAssetRewardIndex(user.clone(), asset.clone());
     let accrued_rewards_key = DataKey::UserAssetAccruedRewards(user.clone(), asset.clone());
-    let last_reward_timestamp_key = DataKey::UserAssetLastRewardTimestamp(user.clone(), asset.clone());
+    let last_reward_timestamp_key =
+        DataKey::UserAssetLastRewardTimestamp(user.clone(), asset.clone());
 
     if position.balance == 0 {
         e.storage().persistent().remove(&balance_key);
     } else {
-        e.storage().persistent().set(&balance_key, &position.balance);
+        e.storage()
+            .persistent()
+            .set(&balance_key, &position.balance);
         bump_persistent_ttl(e, &balance_key);
     }
 
@@ -1061,7 +1313,11 @@ pub fn set_user_asset_position(e: &Env, user: &Address, asset: &Address, positio
 }
 
 /// Get user balance for a specific asset
-pub fn get_user_asset_balance(e: &Env, user: &Address, asset: &Address) -> Result<i128, VaultError> {
+pub fn get_user_asset_balance(
+    e: &Env,
+    user: &Address,
+    asset: &Address,
+) -> Result<i128, VaultError> {
     Ok(get_user_asset_position(e, user, asset)?.balance)
 }
 
@@ -1075,11 +1331,11 @@ pub fn store_asset_deposit(
     if !is_asset_supported(e, asset) {
         return Err(ValidationError::InvalidAddress.into());
     }
-    
+
     let mut position = get_user_asset_position_unchecked(e, user, asset);
     let asset_reward_index = get_asset_reward_index(e, asset)?;
     let asset_total = get_asset_total_deposits(e, asset)?;
-    
+
     // Accrue rewards earned up to this point using the old balance.
     accrue_asset_position_rewards(e, asset_reward_index, &mut position)?;
 
@@ -1109,18 +1365,18 @@ pub fn store_asset_withdraw(
     if !is_asset_supported(e, asset) {
         return Err(ValidationError::InvalidAddress.into());
     }
-    
+
     let mut position = get_user_asset_position_unchecked(e, user, asset);
     let asset_reward_index = get_asset_reward_index(e, asset)?;
     let asset_total = get_asset_total_deposits(e, asset)?;
-    
+
     // Accrue rewards earned up to this point using the old balance.
     accrue_asset_position_rewards(e, asset_reward_index, &mut position)?;
 
     if position.balance < amount {
         return Err(BalanceError::InsufficientBalance.into());
     }
-    
+
     // Update balance and total deposits.
     position.balance = position
         .balance
@@ -1138,14 +1394,18 @@ pub fn store_asset_withdraw(
 }
 
 /// Store reward distribution for a specific asset
-pub fn store_asset_reward_distribution(e: &Env, asset: &Address, amount: i128) -> Result<i128, VaultError> {
+pub fn store_asset_reward_distribution(
+    e: &Env,
+    asset: &Address,
+    amount: i128,
+) -> Result<i128, VaultError> {
     if !is_asset_supported(e, asset) {
         return Err(ValidationError::InvalidAddress.into());
     }
-    
+
     let asset_total = get_asset_total_deposits(e, asset)?;
     let asset_reward_index = get_asset_reward_index(e, asset)?;
-    
+
     let increment = checked_reward_index_increment(amount, asset_total)?;
     let next_reward_index = asset_reward_index
         .checked_add(increment)
@@ -1157,15 +1417,19 @@ pub fn store_asset_reward_distribution(e: &Env, asset: &Address, amount: i128) -
 }
 
 /// Claim rewards for a specific asset
-pub fn store_asset_claimable_rewards(e: &Env, user: &Address, asset: &Address) -> Result<i128, VaultError> {
+pub fn store_asset_claimable_rewards(
+    e: &Env,
+    user: &Address,
+    asset: &Address,
+) -> Result<i128, VaultError> {
     if !is_asset_supported(e, asset) {
         return Err(ValidationError::InvalidAddress.into());
     }
-    
+
     let state = get_state(e)?;
     let mut position = get_user_asset_position_unchecked(e, user, asset);
     let asset_reward_index = get_asset_reward_index(e, asset)?;
-    
+
     // Accrue all rewards earned up to the current global index.
     accrue_asset_position_rewards(e, asset_reward_index, &mut position)?;
 
@@ -1185,16 +1449,20 @@ pub fn store_asset_claimable_rewards(e: &Env, user: &Address, asset: &Address) -
 }
 
 /// Preview user rewards for a specific asset
-pub fn preview_user_asset_rewards(e: &Env, user: &Address, asset: &Address) -> Result<UserRewardSnapshot, VaultError> {
+pub fn preview_user_asset_rewards(
+    e: &Env,
+    user: &Address,
+    asset: &Address,
+) -> Result<UserRewardSnapshot, VaultError> {
     require_initialized(e)?;
     if !is_asset_supported(e, asset) {
         return Err(ValidationError::InvalidAddress.into());
     }
-    
+
     let state = get_state(e)?;
     let mut position = get_user_asset_position_unchecked(e, user, asset);
     let asset_reward_index = get_asset_reward_index(e, asset)?;
-    
+
     // Calculate accrued rewards without modifying state
     accrue_asset_position_rewards(e, asset_reward_index, &mut position)?;
 
@@ -1208,11 +1476,19 @@ pub fn preview_user_asset_rewards(e: &Env, user: &Address, asset: &Address) -> R
     })
 }
 
-pub fn pending_user_asset_rewards_view(e: &Env, user: &Address, asset: &Address) -> Result<i128, VaultError> {
+pub fn pending_user_asset_rewards_view(
+    e: &Env,
+    user: &Address,
+    asset: &Address,
+) -> Result<i128, VaultError> {
     Ok(preview_user_asset_rewards(e, user, asset)?.rewards)
 }
 
-pub fn vested_user_asset_rewards_view(e: &Env, user: &Address, asset: &Address) -> Result<i128, VaultError> {
+pub fn vested_user_asset_rewards_view(
+    e: &Env,
+    user: &Address,
+    asset: &Address,
+) -> Result<i128, VaultError> {
     Ok(preview_user_asset_rewards(e, user, asset)?.vested_rewards)
 }
 

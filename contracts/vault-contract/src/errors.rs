@@ -51,6 +51,8 @@ pub enum ValidationError {
     InsufficientRewardAmount,
     /// Thrown when a lock duration is zero.
     InvalidLockDuration,
+    /// Thrown when a penalty rate is invalid (e.g., above 100%).
+    InvalidPenaltyRate,
     /// Thrown when utilization parameters are invalid (e.g., not sorted).
     InvalidUtilizationParameters,
 }
@@ -140,14 +142,16 @@ pub enum VaultError {
     InsufficientRewardAmount = 18,
     /// Lock duration must be greater than zero
     InvalidLockDuration = 19,
+    /// Penalty rate must be a valid basis point value
+    InvalidPenaltyRate = 20,
     /// Contract upgrade failed
-    UpgradeFailed = 20,
+    UpgradeFailed = 21,
     /// The operation would exceed the per-transaction budget limit
-    OperationLimitExceeded = 21,
-    /// Utilization parameters are invalid (e.g., not sorted)
-    InvalidUtilizationParameters = 22,
+    OperationLimitExceeded = 22,
     /// Cross-contract call failed
     CrossContractCallFailed = 23,
+    /// Utilization parameters are invalid (e.g., not sorted)
+    InvalidUtilizationParameters = 24,
 }
 
 impl VaultError {
@@ -228,6 +232,10 @@ impl VaultError {
             Self::InvalidLockDuration => ErrorInfo {
                 category: ErrorCategory::Validation,
                 message: "lock duration must be greater than zero",
+            },
+            Self::InvalidPenaltyRate => ErrorInfo {
+                category: ErrorCategory::Validation,
+                message: "penalty rate must be between 0 and 10000 basis points",
             },
             Self::UpgradeFailed => ErrorInfo {
                 category: ErrorCategory::Authorization,
